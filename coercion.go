@@ -1,9 +1,7 @@
 package dict
 
 import (
-	"errors"
 	"fmt"
-	"slices"
 	"strconv"
 	"time"
 )
@@ -13,68 +11,6 @@ type (
 
 	CoercePtrFunc[T any] func(any) (*T, error)
 )
-
-func Coerce[T any](d Dict, key string, cfn CoerceValueFunc[T]) (T, error) {
-	var zero T
-	if v, ok := d[key]; !ok {
-		return zero, fmt.Errorf("%w: %q", ErrKeyNotFound, key)
-	} else if as, err := cfn(v); err != nil {
-		return zero, fmt.Errorf("%w: expected %T, saw %T", ErrValueTypeMismatch, zero, v)
-	} else {
-		return as, nil
-	}
-}
-
-func CoerceOr[T any](d Dict, key string, cfn CoerceValueFunc[T], or T) T {
-	if v, err := Coerce[T](d, key, cfn); err != nil {
-		return or
-	} else {
-		return v
-	}
-}
-
-// CoerceNonZeroComparableOr is significantly different from CoerceOr in that it considers a comparable's zero-val to be
-// "empty", thus returning the value provided to "or".
-//
-// This is an important distinction.
-func CoerceNonZeroComparableOr[T comparable](d Dict, key string, cfn CoerceValueFunc[T], or T) T {
-	var zero T
-	if v, err := Coerce[T](d, key, cfn); err != nil || v == zero {
-		return or
-	} else {
-		return v
-	}
-}
-
-func CoerceValueSlice[T any](cfn CoerceValueFunc[T]) func(any) ([]T, error) {
-	return func(v any) ([]T, error) {
-		switch v.(type) {
-		case []T:
-			return slices.Clone(v.([]T)), nil
-
-		case []any:
-			var (
-				out  []T
-				errs []error
-			)
-			for i, vv := range v.([]any) {
-				if tv, err := cfn(vv); err != nil {
-					errs = append(errs, fmt.Errorf("index %d: %w", i, err))
-				} else {
-					out = append(out, tv)
-				}
-			}
-			if len(errs) > 0 {
-				return nil, errors.Join(errs...)
-			}
-			return out, nil
-
-		default:
-			var tzero []T
-			return nil, fmt.Errorf("%w: %T to %T", ErrCannotCoerceValueType, v, tzero)
-		}
-	}
-}
 
 type (
 	durer interface {
@@ -234,5 +170,26 @@ func coerceDict(v any) (Dict, error) {
 
 	default:
 		return nil, fmt.Errorf("%w: %T to %T", ErrCannotCoerceValueType, v, 0)
+	}
+}
+
+func CoerceExact[T any](v any) (T, error) {
+	if vt, ok := v.(T); !ok {
+		var zero T
+		return zero, fmt.Errorf("%w: %T to %T", ErrCannotCoerceValueType, v, 0)
+	} else {
+		return vt, nil
+	}
+}
+
+func CoerceExactPtr[T any](v any) (*T, error) {
+	if vt, ok := v.(T); !ok {
+		if vt, ok := v.(*T); !ok {
+			return nil, fmt.Errorf("%w: %T to %T", ErrCannotCoerceValueType, v, 0)
+		} else {
+			return vt, nil
+		}
+	} else {
+		return &vt, nil
 	}
 }

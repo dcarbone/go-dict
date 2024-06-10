@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"time"
 )
 
@@ -15,6 +16,62 @@ var (
 
 type Dict map[string]any
 
+func Get[T any](d Dict, key string, cfn CoerceValueFunc[T]) (T, error) {
+	var zero T
+	if v, ok := d[key]; !ok {
+		return zero, fmt.Errorf("%w: %q", ErrKeyNotFound, key)
+	} else if as, err := cfn(v); err != nil {
+		return zero, fmt.Errorf("%w: expected %T, saw %T", ErrValueTypeMismatch, zero, v)
+	} else {
+		return as, nil
+	}
+}
+
+func MustGet[T any](d Dict, key string, cfn CoerceValueFunc[T]) T {
+	if as, err := Get(d, key, cfn); err != nil {
+		panic(err.Error())
+	} else {
+		return as
+	}
+}
+
+func GetOr[T any](d Dict, key string, cfn CoerceValueFunc[T], or T) T {
+	if v, err := Get[T](d, key, cfn); err != nil {
+		return or
+	} else {
+		return v
+	}
+}
+
+// GetNonZeroComparableOr is significantly different from GetOr in that it considers a comparable's zero-val to be
+// "empty", thus returning the value provided to "or".
+//
+// This is an important distinction.
+func GetNonZeroComparableOr[T comparable](d Dict, key string, cfn CoerceValueFunc[T], or T) T {
+	var zero T
+	if v, err := Get[T](d, key, cfn); err != nil || v == zero {
+		return or
+	} else {
+		return v
+	}
+}
+
+func GetExact[T any](d Dict, key string) (T, error) {
+	return Get(d, key, CoerceExact[T])
+}
+
+func MustGetExact[T any](d Dict, key string) T {
+	return MustGet(d, key, CoerceExact[T])
+}
+
+func GetExactPtr[T any](d Dict, key string) (*T, error) {
+	return GetPtr(d, key, CoerceExactPtr[T])
+}
+
+func MustGetExactPtr[T any](d Dict, key string) *T {
+	return MustGetPtr(d, key, CoerceExactPtr[T])
+}
+
 func GetPtr[T any](d Dict, key string, cfn CoercePtrFunc[T]) (*T, error) {
 	if v, ok := d[key]; !ok {
 		return nil, fmt.Errorf("%w: %q", ErrKeyNotFound, key)
@@ -22,14 +79,6 @@ func GetPtr[T any](d Dict, key string, cfn CoercePtrFunc[T]) (*T, error) {
 		return nil, fmt.Errorf("%w: expected %T, saw %T", ErrValueTypeMismatch, (*T)(nil), v)
 	} else {
 		return as, nil
-	}
-}
-
-func MustGet[T any](d Dict, key string, cfn func(v any) (T, error)) T {
-	if as, err := Coerce(d, key, cfn); err != nil {
-		panic(err.Error())
-	} else {
-		return as
 	}
 }
 
@@ -41,24 +90,63 @@ func MustGetPtr[T any](d Dict, key string, cfn CoercePtrFunc[T]) *T {
 	}
 }
 
-func GetExact[T any](v any) (T, error) {
-	var zero T
-	if vt, ok := v.(T); !ok {
-		return zero, fmt.Errorf("%w: %T to %T", ErrCannotCoerceValueType, v, 0)
-	} else {
-		return vt, nil
+func GetSlice[T any](cfn CoerceValueFunc[T]) func(any) ([]T, error) {
+	return func(v any) ([]T, error) {
+		switch v.(type) {
+		case []T:
+			return slices.Clone(v.([]T)), nil
+
+		case []any:
+			var (
+				out  []T
+				errs []error
+			)
+			for i, vv := range v.([]any) {
+				if tv, err := cfn(vv); err != nil {
+					errs = append(errs, fmt.Errorf("index %d: %w", i, err))
+				} else {
+					out = append(out, tv)
+				}
+			}
+			if len(errs) > 0 {
+				return nil, errors.Join(errs...)
+			}
+			return out, nil
+
+		default:
+			var tzero []T
+			return nil, fmt.Errorf("%w: %T to %T", ErrCannotCoerceValueType, v, tzero)
+		}
 	}
 }
 
-func GetExactPtr[T any](v any) (*T, error) {
-	if vt, ok := v.(T); !ok {
-		if vt, ok := v.(*T); !ok {
-			return nil, fmt.Errorf("%w: %T to %T", ErrCannotCoerceValueType, v, 0)
-		} else {
-			return vt, nil
+func GetSlicePtr[T any](cfn CoercePtrFunc[T]) func(any) ([]*T, error) {
+	return func(v any) ([]*T, error) {
+		switch v.(type) {
+		case []*T:
+			return slices.Clone(v.([]*T)), nil
+
+		case []any:
+			var (
+				out  []*T
+				errs []error
+			)
+			for i, vv := range v.([]any) {
+				if tv, err := cfn(vv); err != nil {
+					errs = append(errs, fmt.Errorf("index %d: %w", i, err))
+				} else {
+					out = append(out, tv)
+				}
+			}
+			if len(errs) > 0 {
+				return nil, errors.Join(errs...)
+			}
+			return out, nil
+
+		default:
+			var tzero []*T
+			return nil, fmt.Errorf("%w: %T to %T", ErrCannotCoerceValueType, v, tzero)
 		}
-	} else {
-		return &vt, nil
 	}
 }
 
@@ -73,11 +161,11 @@ func (d Dict) ShallowMerge(other Dict) Dict {
 }
 
 func (d Dict) GetInt(key string) (int, error) {
-	return Coerce(d, key, coerceInt)
+	return Get(d, key, coerceInt)
 }
 
 func (d Dict) GetIntOr(key string, def int) int {
-	return CoerceNonZeroComparableOr(d, key, coerceInt, def)
+	return GetNonZeroComparableOr(d, key, coerceInt, def)
 }
 
 func (d Dict) MustGetInt(key string) int {
@@ -85,11 +173,11 @@ func (d Dict) MustGetInt(key string) int {
 }
 
 func (d Dict) GetString(key string) (string, error) {
-	return Coerce(d, key, coerceString)
+	return Get(d, key, coerceString)
 }
 
 func (d Dict) GetStringOr(key string, def string) string {
-	return CoerceNonZeroComparableOr(d, key, coerceString, def)
+	return GetNonZeroComparableOr(d, key, coerceString, def)
 }
 
 func (d Dict) MustGetString(key string) string {
@@ -97,11 +185,11 @@ func (d Dict) MustGetString(key string) string {
 }
 
 func (d Dict) GetBool(key string) (bool, error) {
-	return Coerce(d, key, coerceBool)
+	return Get(d, key, coerceBool)
 }
 
 func (d Dict) GetBoolOr(key string, def bool) bool {
-	return CoerceOr(d, key, coerceBool, def)
+	return GetOr(d, key, coerceBool, def)
 }
 
 func (d Dict) MustGetBool(key string) bool {
@@ -109,11 +197,11 @@ func (d Dict) MustGetBool(key string) bool {
 }
 
 func (d Dict) GetDuration(key string) (time.Duration, error) {
-	return Coerce(d, key, coerceDuration)
+	return Get(d, key, coerceDuration)
 }
 
 func (d Dict) GetDurationOr(key string, def time.Duration) time.Duration {
-	return CoerceNonZeroComparableOr(d, key, coerceDuration, def)
+	return GetNonZeroComparableOr(d, key, coerceDuration, def)
 }
 
 func (d Dict) MustGetDuration(key string) time.Duration {
@@ -121,11 +209,11 @@ func (d Dict) MustGetDuration(key string) time.Duration {
 }
 
 func (d Dict) GetDict(key string) (Dict, error) {
-	return Coerce(d, key, coerceDict)
+	return Get(d, key, coerceDict)
 }
 
 func (d Dict) GetDictOr(key string, def Dict) Dict {
-	return CoerceOr(d, key, coerceDict, def)
+	return GetOr(d, key, coerceDict, def)
 }
 
 func (d Dict) MustGetDict(key string) Dict {
@@ -133,25 +221,25 @@ func (d Dict) MustGetDict(key string) Dict {
 }
 
 func (d Dict) GetStrings(key string) ([]string, error) {
-	return Coerce(d, key, CoerceValueSlice(coerceString))
+	return Get(d, key, GetSlice(coerceString))
 }
 
 func (d Dict) MustGetStrings(key string) []string {
-	return MustGet(d, key, CoerceValueSlice(coerceString))
+	return MustGet(d, key, GetSlice(coerceString))
 }
 
 func (d Dict) GetStringsOr(key string, def []string) []string {
-	return CoerceOr(d, key, CoerceValueSlice(coerceString), def)
+	return GetOr(d, key, GetSlice(coerceString), def)
 }
 
 func (d Dict) GetInts(key string) ([]int, error) {
-	return Coerce(d, key, CoerceValueSlice(coerceInt))
+	return Get(d, key, GetSlice(coerceInt))
 }
 
 func (d Dict) MustGetInts(key string) []int {
-	return MustGet(d, key, CoerceValueSlice(coerceInt))
+	return MustGet(d, key, GetSlice(coerceInt))
 }
 
 func (d Dict) GetIntsOr(key string, def []int) []int {
-	return CoerceOr(d, key, CoerceValueSlice(coerceInt), def)
+	return GetOr(d, key, GetSlice(coerceInt), def)
 }
